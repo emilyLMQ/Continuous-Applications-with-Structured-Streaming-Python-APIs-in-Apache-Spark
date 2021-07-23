@@ -16,6 +16,8 @@ from pyspark.sql.functions import count, rand, collect_list, explode, struct, co
 from pyspark.sql.functions import col
 from pyspark.sql.functions import *
 
+import pyspark.sql.functions as F
+
 oneHot = OneHotEncoder(inputCols=["amountRange"], outputCols=["amountVect"])
 
 # vectorSizeHint transformer used here because vectorAssembler can only work on 
@@ -38,6 +40,7 @@ test = data.filter(col("time") % 10 >= 8)
   .mode("overwrite")
   .parquet(output_test_parquet_data))
 
+# display real time data process in dashboard
 display(test)
 test.count()
 
@@ -62,3 +65,39 @@ streamingData = (spark.readStream
                  )
 
 stream = pipelineModel.transform(streamingData)
+
+# do aggregations using PySpark Dataframe APIs
+streamPredictions = (pipelineModel.transform(streamingData) #infer or score against our test data
+          .groupBy("label", "prediction")
+          .count()
+          .sort("label", "prediction"))
+
+# display real time data process in dashboard
+display(streamPredictions)
+
+
+# Model performance evaluation
+stream = pipelineModel.transform(streamingData)
+
+# change timestamp to standard time format
+stream = stream.withColumn("timestamp",F.from_unixtime(F.col("time")+1618358400))
+metrics=stream.groupBy(window("timestamp", "12 hours").alias('PROCESSED_TIME'))\
+              .agg(count(when((col('label')==1)&(col('prediction')==1), True)).alias('TP')
+              , count(when((col('label')==0)&(col('prediction')==1), True)).alias('FP')
+              , count(when((col('label')==1)&(col('prediction')==0), True)).alias('FN')
+              , count(when((col('label')==0)&(col('prediction')==0), True)).alias('TN'))
+
+stream_evaluator = metrics\
+                 .withColumn("Precision", (F.col("TP") / (F.col("TP") + F.col("FP"))))\
+                 .withColumn("Recall", (F.col("TP") / (F.col("TP") + F.col("FN"))))
+
+stream_F1 = stream_evaluator\
+                 .withColumn("F1", (2 * F.col("Precision") * F.col("Recall")) / (F.col("Precision") + F.col("Recall")))
+
+# display real-time model performance evaluation
+display(metrics)
+display(stream_F1)
+
+# remove files
+dbutils.fs.rm(output_test_parquet_data, True)
+
